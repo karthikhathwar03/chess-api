@@ -25,6 +25,16 @@ async function getStats(username) {
     return await response.json();
 }
 
+function totalGames(mode) {
+    if (!mode || !mode.record) return 0;
+
+    const wins = mode.record.win || 0;
+    const losses = mode.record.loss || 0;
+    const draws = mode.record.draw || 0;
+
+    return wins + losses + draws;
+}
+
 // ALL RATINGS + PEAKS
 app.get("/rating", async (req, res) => {
     const username = cleanUsername(req.query.user);
@@ -43,6 +53,25 @@ app.get("/rating", async (req, res) => {
 
     res.send(
         `♟️ ${username} → Rapid: ${rapid} (Peak ${rapidPeak}) | Blitz: ${blitz} (Peak ${blitzPeak}) | Bullet: ${bullet} (Peak ${bulletPeak})`
+    );
+});
+
+app.get("/games", async (req, res) => {
+    const username = cleanUsername(req.query.user);
+    const data = await getStats(username);
+
+    if (!data) return res.send("Player not found.");
+
+    const rapid = totalGames(data.chess_rapid);
+    const blitz = totalGames(data.chess_blitz);
+    const bullet = totalGames(data.chess_bullet);
+    const daily = totalGames(data.chess_daily);
+    const chess960 = totalGames(data.chess960_daily);
+
+    const total = rapid + blitz + bullet + daily + chess960;
+
+    res.send(
+        `🎮 ${username} → Rapid: ${rapid} | Blitz: ${blitz} | Bullet: ${bullet} | Daily: ${daily} | 960: ${chess960} | Total: ${total}`
     );
 });
 
