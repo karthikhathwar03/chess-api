@@ -112,6 +112,232 @@ app.get("/compare", async (req, res) => {
     );
 });
 
+
+// ===============================
+// CHESS.COM HEAD-TO-HEAD
+// ===============================
+
+// Cache Chess.com responses for 10 minutes
+const h2hCache = new Map();
+const H2H_CACHE_TIME = 10 * 60 * 1000;
+
+// Fetch Chess.com API data
+async function getChessComJson(url) {
+    const cached = h2hCache.get(url);
+
+    if (cached && Date.now() - cached.time < H2H_CACHE_TIME) {
+        return cached.data;
+    }
+
+    try {
+        const response = await fetch(url, {
+            headers: {
+                "User-Agent": "BlunderexpertChessBot/1.0"
+            }
+        });
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+
+        h2hCache.set(url, {
+            data,
+            time: Date.now()
+        });
+
+        return data;
+
+    } catch (error) {
+        console.error("Chess.com API error:", error.message);
+        return null;
+    }
+}
+
+// Identify the game result
+function getGameOutcome(game) {
+    const whiteResult = (game.white?.result || "").toLowerCase();
+    const blackResult = (game.black?.result || "").toLowerCase();
+
+    if (whiteResult === "win") return "white";
+    if (blackResult === "win") return "black";
+
+    const pgnResult = game.pgn?.match(
+        /\[Result\s+"(1-0|0-1|1\/2-1\/2|\*)"\]/
+    )?.[1];
+
+    if (pgnResult === "1-0") return "white";
+    if (pgnResult === "0-1") return "black";
+    if (pgnResult === "1/2-1/2") return "draw";
+
+    const drawResults = [
+        "agreed",
+        "repetition",
+        "stalemate",
+        "insufficient",
+        "50move",
+        "timevsinsufficient",
+        "draw"
+    ];
+
+    if (
+        drawResults.includes(whiteResult) ||
+        drawResults.includes(blackResult)
+    ) {
+        return "draw";
+    }
+
+    return null;
+}
+
+// HEAD-TO-HEAD ROUTE
+app.get("/h2h", async (req, res) => {
+
+    const users = req.query.users;
+
+    if (!users) {
+        return res.send("Use: !h2h username1 username2");
+    }
+
+    const usernames = users.trim().split(/\s+/);
+
+    if (usernames.length < 2) {
+        return res.send("Please provide two Chess.com usernames.");
+    }
+
+    const player1 = usernames[0].replace(/^@/, "").toLowerCase();
+    const player2 = usernames[1].replace(/^@/, "").toLowerCase();
+
+    const validUsername = /^[a-z0-9_-]{3,25}$/;
+
+    if (!validUsername.test(player1) || !validUsername.test(player2)) {
+        return res.send("Invalid Chess.com username.");
+    }
+
+    if (player1 === player2) {
+        return res.send("Please enter two different usernames.");
+    }
+
+    try {
+
+        // Get both players' archive lists
+        const archiveData1 = await getChessComJson(
+            `https://api.chess.com/pub/player/${encodeURIComponent(player1)}/games/archives`
+        );
+
+        const archiveData2 = await getChessComJson(
+            `https://api.chess.com/pub/player/${encodeURIComponent(player2)}/games/archives`
+        );
+
+        if (!archiveData1 || !archiveData2) {
+            return res.status(502).send(
+                "Could not retrieve Chess.com archives. Try again later."
+            );
+        }
+
+        // Find months available in both players' archives
+        const player2Months = new Set(
+            (archiveData2.archives || [])
+                .map(url => url.match(/\/games\/(\d{4}\/\d{2})$/)?.[1])
+                .filter(Boolean)
+        );
+
+        const archives = (archiveData1.archives || []).filter(url => {
+            const month = url.match(/\/games\/(\d{4}\/\d{2})$/)?.[1];
+            return month && player2Months.has(month);
+        });
+
+        if (archives.length === 0) {
+            return res.send(
+                `No shared Chess.com archive months found for ${player1} and ${player2}.`
+            );
+        }
+
+        let player1Wins = 0;
+        let player2Wins = 0;
+        let draws = 0;
+        let matchedGames = 0;
+
+        // Check each shared monthly archive
+        for (const archiveUrl of archives) {
+
+            const month = await getChessComJson(archiveUrl);
+
+            if (!month) {
+                return res.status(502).send(
+                    "Chess.com archive lookup was incomplete. Try again later."
+                );
+            }
+
+            for (const game of (month.games || [])) {
+
+                // Standard chess only
+                if (game.rules && game.rules !== "chess") continue;
+
+                const white = (game.white?.username || "").toLowerCase();
+                const black = (game.black?.username || "").toLowerCase();
+
+                const isMatch =
+                    (white === player1 && black === player2) ||
+                    (white === player2 && black === player1);
+
+                if (!isMatch) continue;
+
+                const outcome = getGameOutcome(game);
+
+                if (!outcome) continue;
+
+                matchedGames++;
+
+                if (outcome === "draw") {
+                    draws++;
+                } else {
+                    const winner = outcome === "white" ? white : black;
+
+                    if (winner === player1) {
+                        player1Wins++;
+                    } else if (winner === player2) {
+                        player2Wins++;
+                    }
+                }
+            }
+        }
+
+        if (matchedGames === 0) {
+            return res.send(
+                `No completed standard chess games found between ${player1} and ${player2} in their available public archives.`
+            );
+        }
+
+        let leaderMessage;
+
+        if (player1Wins > player2Wins) {
+            leaderMessage =
+                `🏆 ${player1} leads by ${player1Wins - player2Wins} win(s)!`;
+        } else if (player2Wins > player1Wins) {
+            leaderMessage =
+                `🏆 ${player2} leads by ${player2Wins - player1Wins} win(s)!`;
+        } else {
+            leaderMessage = "🤝 The head-to-head score is tied!";
+        }
+
+        res.send(
+            `⚔️ H2H ${player1} vs ${player2} → ` +
+            `${player1}: ${player1Wins} wins | ` +
+            `${player2}: ${player2Wins} wins | ` +
+            `Draws: ${draws} | Total: ${matchedGames} games. ` +
+            leaderMessage
+        );
+
+    } catch (error) {
+        console.error("H2H route error:", error.message);
+
+        res.status(500).send(
+            "Something went wrong while checking head-to-head."
+        );
+    }
+});
+
+
 // ===============================
 // FUN HINGLISH COMMANDS
 // ===============================
